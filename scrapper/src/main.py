@@ -5,6 +5,7 @@ import gc
 import logging
 import os
 import random
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -14,7 +15,7 @@ import pandas as pd
 from jobspy import scrape_jobs
 
 # Import relativo dentro del paquete src
-from s3_uploader import subir_a_s3
+from s3_uploader import subir_a_s3, verificar_conexion_s3
 
 # Configuración del logging nativo
 logging.basicConfig(
@@ -134,6 +135,16 @@ def main() -> None:
         results_wanted = 40
         delay_range = (7, 12)
 
+    # Obtener entorno (por defecto 'prod' si no se especifica)
+    APP_ENV = os.getenv("APP_ENV", "dev").lower()
+    BUCKET_BASE = "pipeline-scrapping-linkedin"
+    BUCKET_NAME = f"{BUCKET_BASE}-dev" if APP_ENV == "dev" else BUCKET_BASE
+
+    # Comprobar siempre la conexión a S3 antes de scrapear
+    if not verificar_conexion_s3(BUCKET_NAME):
+        logger.error("Abortando scraping: no hay conexión o permisos con el bucket S3.")
+        sys.exit(1)
+
     # 1. Extracción de ofertas
     for is_remote, loc in search_tasks:
         logger.info("Iniciando bloque: %s", "Remoto (Spain)" if is_remote else loc)
@@ -152,23 +163,16 @@ def main() -> None:
 
     if not ruta_final.exists():
         logger.warning("No se generó ningún CSV para persistir en S3.")
-        return
+        raise Exception("No se generó ningún CSV para persistir en S3.")
 
     ahora = datetime.now()
     clave_s3 = f"raw/year={ahora.strftime('%Y')}/month={ahora.strftime('%m')}/{nombre_archivo}"
 
-    # Obtener entorno (por defecto 'prod' si no se especifica)
-    APP_ENV = os.getenv("APP_ENV", "prod").lower()
-    BUCKET_BASE = "pipeline-scrapping-linkedin"  # Tu nombre base
-
-    if APP_ENV == "dev":
-        BUCKET_NAME = f"{BUCKET_BASE}-dev"
+    if subir_a_s3(ruta_final, BUCKET_NAME, clave_s3):
+        logger.info("Archivo '%s' subido a S3 con clave '%s'.", ruta_final.name, clave_s3)
     else:
-        BUCKET_NAME = BUCKET_BASE    
-
-    subir_a_s3(ruta_final, BUCKET_NAME, clave_s3)
-    logger.info("Ejecución finalizada con éxito.")
-
+        logger.error("Fallo al subir '%s' a S3.", ruta_final.name)
+        raise Exception("Fallo al subir archivo a S3.")
 
 if __name__ == "__main__":
     main()

@@ -16,7 +16,7 @@ def list_s3_keys_under_prefix(s3_client, bucket, prefix):
 
 def run_sync():
     # 1. Variables inyectadas directamente por GitHub Actions
-    env = os.environ.get("ENV").strip().lower()
+    env = os.environ.get("ENV", "prod").strip().lower()
     bucket = os.environ.get("S3_BUCKET")
     token = os.environ.get("MOTHERDUCK_TOKEN")
     aws_key = os.environ.get("AWS_ACCESS_KEY_ID")
@@ -40,12 +40,10 @@ def run_sync():
         sys.exit(1)
 
     table_name = "t_scrap_offers_b"
-    # Ruta explícita: db.schema.table
     full_table_path = f"{motherduck_db}.bronze.{table_name}"
 
     # 2. Conexión y configuración de MotherDuck / S3
     con = duckdb.connect(f"md:{motherduck_db}?motherduck_token={token}")
-    # Nuevo (robusto con MotherDuck y S3):
     con.execute("INSTALL httpfs; LOAD httpfs;")
     con.execute(f"""
         CREATE OR REPLACE SECRET s3_creds (
@@ -78,7 +76,6 @@ def run_sync():
         else:
             last_date = date(2026, 1, 1)
 
-        # Control estricto de idempotencia por URI completa
         loaded_res = con.execute(f"SELECT DISTINCT source_file FROM {full_table_path};").fetchall()
         already_loaded_files = {row[0] for row in loaded_res if row[0]}
 
@@ -107,7 +104,6 @@ def run_sync():
             if full_s3_uri in already_loaded_files:
                 continue
 
-            # Caso 1: Archivo consolidado mensual (raw/year=YYYY/month_X.csv)
             match_month = re.search(r"raw/year=(\d{4})/month_(\d+)\.csv$", key)
             if match_month:
                 f_year, f_month = int(match_month.group(1)), int(match_month.group(2))
@@ -121,7 +117,6 @@ def run_sync():
                     print(f"  [+] Mes cerrado localizado: {key}")
                 continue
 
-            # Caso 2: Archivo diario (raw/year=YYYY/month=MM/ofertas_it_YYYY-MM-DD_at_*.csv)
             match_daily = re.search(r"ofertas_it_(\d{4}-\d{2}-\d{2})_at_.*\.csv$", key)
             if match_daily:
                 f_date = datetime.strptime(match_daily.group(1), "%Y-%m-%d").date()
@@ -137,7 +132,6 @@ def run_sync():
 
     print(f"[*] Cargando {len(files_to_load)} archivo(s) en {full_table_path}...")
 
-    # Parser robusto para fechas de extracción y metadatos
     date_parsing_sql = """
         CASE 
             WHEN regexp_matches(filename, 'ofertas_it_\\d{4}-\\d{2}-\\d{2}_at_') 
@@ -163,15 +157,25 @@ def run_sync():
             FROM read_csv($1, filename = true, auto_detect = true, union_by_name = true);
         """, [files_to_load])
     else:
-        # Se filtra contra la tabla destino para evitar duplicar si un archivo se procesó parcialmente
-        con.execute(f"""
-            INSERT INTO {full_table_path}
-            SELECT 
-                src.*,
-                {date_parsing_sql}
-            FROM read_csv($1, filename = true, auto_detect = true, union_by_name = true) AS src
-            WHERE filename NOT IN (SELECT DISTINCT source_file FROM {full_table_path});
-        """, [files_to_load])
+        # 1. Obtenemos exactamente la lista de columnas que ya tiene la tabla
+        columns_desc = con.execute(f"DESCRIBE {full_table_path};").fetchall()
+        existing_cols = [row[0] for row in columns_desc]
+        cols_select_str = ", ".join(f'"{col}"' for col in existing_cols)
+
+        # 2. Hacemos un CTE con la lectura completa y proyectamos SOLO las columnas existentes
+        insert_query = f"""
+            WITH incoming_data AS (
+                SELECT 
+                    *,
+                    {date_parsing_sql}
+                FROM read_csv($1, filename = true, auto_detect = true, union_by_name = true)
+            )
+            INSERT INTO {full_table_path} BY NAME
+            SELECT {cols_select_str}
+            FROM incoming_data
+            WHERE source_file NOT IN (SELECT DISTINCT source_file FROM {full_table_path});
+        """
+        con.execute(insert_query, [files_to_load])
 
     # 6. Resumen de ejecución
     total_filas = con.execute(f"SELECT COUNT(*) FROM {full_table_path};").fetchone()[0]
