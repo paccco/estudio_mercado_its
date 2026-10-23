@@ -72,6 +72,11 @@ def realizar_busqueda(
             fetch_description=True
         )
 
+        # jobspy expone los fallos por portal en attrs; permite distinguir bloqueo de "sin resultados"
+        errores = jobs.attrs.get("errors")
+        if errores:
+            logger.error("Errores de scraping (%s) para '%s': %s", tipo, term, errores)
+
         df_res = pd.DataFrame(jobs)
         if not df_res.empty:
             df_res["search_location"] = "Remote (Spain)" if is_remote else loc
@@ -162,6 +167,9 @@ def main() -> None:
 
     # 3. Finalización temprana si es Smoke Test
     if is_test:
+        if not ruta_final.exists():
+            logger.error("Smoke test fallido: no se generó ningún CSV.")
+            sys.exit(1)
         logger.info("Smoke test completado exitosamente.")
         return
 
