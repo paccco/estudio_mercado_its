@@ -136,8 +136,11 @@ def main() -> None:
         results_wanted = 40
         delay_range = (7, 12)
 
-    # Obtener entorno (por defecto 'prod' si no se especifica)
-    APP_ENV = os.getenv("APP_ENV", "dev").lower()
+    # Obtener entorno (obligatorio: dev o prod)
+    APP_ENV = os.getenv("APP_ENV", "").strip().lower()
+    if APP_ENV not in ("dev", "prod"):
+        logger.error("APP_ENV no definido o inválido (%r). Valores permitidos: dev, prod.", APP_ENV)
+        sys.exit(1)
     BUCKET_BASE = "pipeline-scrapping-linkedin"
     BUCKET_NAME = f"{BUCKET_BASE}-dev" if APP_ENV == "dev" else BUCKET_BASE
 
