@@ -14,6 +14,12 @@ def list_s3_keys_under_prefix(s3_client, bucket, prefix):
             keys.append(obj['Key'])
     return keys
 
+def check_yesterday(env, yesterday, yesterday_found):
+    """En prod, falla si el scrapper no subió ningún archivo con la fecha de ayer."""
+    if env == "prod" and not yesterday_found:
+        print(f"[ERROR] No hay ningún archivo con fecha {yesterday} en S3. ¿Falló el scrapper?")
+        sys.exit(1)
+
 def run_sync():
     # 1. Variables inyectadas directamente por GitHub Actions
     env = os.environ.get("ENV", "prod").strip().lower()
@@ -80,9 +86,9 @@ def run_sync():
         already_loaded_files = {row[0] for row in loaded_res if row[0]}
 
     start_date = last_date + timedelta(days=1)
-    end_date = date.today()
+    yesterday = date.today() - timedelta(days=1)
 
-    print(f"[*] Ventana de búsqueda: desde {start_date} hasta {end_date}")
+    print(f"[*] Archivos ya cargados: {len(already_loaded_files)}")
 
     # 4. Exploración dinámica en S3
     s3_client = boto3.client(
@@ -92,42 +98,41 @@ def run_sync():
         aws_secret_access_key=aws_secret
     )
 
-    target_years = range(start_date.year, end_date.year + 1)
     files_to_load = []
+    yesterday_found = False
 
-    for yr in target_years:
-        prefix = f"raw/year={yr}/"
-        s3_keys = list_s3_keys_under_prefix(s3_client, bucket, prefix)
+    # Se recorre todo raw/ para no perder archivos diarios que llegaron tarde
+    for key in list_s3_keys_under_prefix(s3_client, bucket, "raw/"):
+        full_s3_uri = f"s3://{bucket}/{key}"
+        match_daily = re.search(r"ofertas_it_(\d{4}-\d{2}-\d{2})_at_.*\.csv$", key)
+        if match_daily and match_daily.group(1) == yesterday.isoformat():
+            yesterday_found = True
 
-        for key in s3_keys:
-            full_s3_uri = f"s3://{bucket}/{key}"
-            if full_s3_uri in already_loaded_files:
-                continue
+        if full_s3_uri in already_loaded_files:
+            continue
 
-            match_month = re.search(r"raw/year=(\d{4})/month_(\d+)\.csv$", key)
-            if match_month:
-                f_year, f_month = int(match_month.group(1)), int(match_month.group(2))
-                if f_month == 12:
-                    month_end_date = date(f_year + 1, 1, 1) - timedelta(days=1)
-                else:
-                    month_end_date = date(f_year, f_month + 1, 1) - timedelta(days=1)
+        match_month = re.search(r"raw/year=(\d{4})/month_(\d+)\.csv$", key)
+        if match_month:
+            f_year, f_month = int(match_month.group(1)), int(match_month.group(2))
+            if f_month == 12:
+                month_end_date = date(f_year + 1, 1, 1) - timedelta(days=1)
+            else:
+                month_end_date = date(f_year, f_month + 1, 1) - timedelta(days=1)
 
-                if month_end_date >= start_date:
-                    files_to_load.append(full_s3_uri)
-                    print(f"  [+] Mes cerrado localizado: {key}")
-                continue
+            if month_end_date >= start_date:
+                files_to_load.append(full_s3_uri)
+                print(f"  [+] Mes cerrado localizado: {key}")
+            continue
 
-            match_daily = re.search(r"ofertas_it_(\d{4}-\d{2}-\d{2})_at_.*\.csv$", key)
-            if match_daily:
-                f_date = datetime.strptime(match_daily.group(1), "%Y-%m-%d").date()
-                if start_date <= f_date <= end_date:
-                    files_to_load.append(full_s3_uri)
-                    print(f"  [+] Archivo diario localizado: {key}")
+        if match_daily:
+            files_to_load.append(full_s3_uri)
+            print(f"  [+] Archivo diario localizado: {key}")
 
     # 5. Ingesta en MotherDuck
     if not files_to_load:
         print("[*] No se encontraron nuevas particiones pendientes de carga.")
         con.close()
+        check_yesterday(env, yesterday, yesterday_found)
         return
 
     print(f"[*] Cargando {len(files_to_load)} archivo(s) en {full_table_path}...")
@@ -154,7 +159,7 @@ def run_sync():
             SELECT 
                 *,
                 {date_parsing_sql}
-            FROM read_csv($1, filename = true, auto_detect = true, union_by_name = true);
+            FROM read_csv($1, filename = true, auto_detect = true, all_varchar = true, union_by_name = true);
         """, [files_to_load])
     else:
         # 1. Obtenemos exactamente la lista de columnas que ya tiene la tabla
@@ -168,7 +173,7 @@ def run_sync():
                 SELECT 
                     *,
                     {date_parsing_sql}
-                FROM read_csv($1, filename = true, auto_detect = true, union_by_name = true)
+                FROM read_csv($1, filename = true, auto_detect = true, all_varchar = true, union_by_name = true)
             )
             INSERT INTO {full_table_path} BY NAME
             SELECT {cols_select_str}
@@ -181,6 +186,7 @@ def run_sync():
     total_filas = con.execute(f"SELECT COUNT(*) FROM {full_table_path};").fetchone()[0]
     print(f"[✓] Carga completada con éxito. Total registros en {full_table_path}: {total_filas}")
     con.close()
+    check_yesterday(env, yesterday, yesterday_found)
 
 if __name__ == "__main__":
     run_sync()
