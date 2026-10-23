@@ -68,7 +68,8 @@ def realizar_busqueda(
             results_wanted=results_wanted,
             hours_old=24,
             is_remote=is_remote,
-            linkedin_fetch_description=True
+            country_indeed="spain",
+            fetch_description=True
         )
 
         df_res = pd.DataFrame(jobs)
