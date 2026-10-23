@@ -5,10 +5,6 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
@@ -16,7 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 RUN mkdir -p /app/scraps
 
-# Define /app como raíz de módulos para que 'src.s3_uploader' resuelva directamente
+# /app en PYTHONPATH (main.py importa s3_uploader desde su propio directorio src/)
 ENV PYTHONPATH=/app
 
 CMD ["python", "src/main.py"]
