@@ -14,7 +14,7 @@ from typing import List, Tuple
 import pandas as pd
 from jobspy import scrape_jobs
 
-# Import relativo dentro del paquete src
+# Import absoluto: Python añade el directorio del script (src/) a sys.path
 from s3_uploader import subir_a_s3, verificar_conexion_s3
 
 # Configuración del logging nativo
@@ -68,8 +68,14 @@ def realizar_busqueda(
             results_wanted=results_wanted,
             hours_old=24,
             is_remote=is_remote,
-            linkedin_fetch_description=True
+            country_indeed="spain",
+            fetch_description=True
         )
+
+        # jobspy expone los fallos por portal en attrs; permite distinguir bloqueo de "sin resultados"
+        errores = jobs.attrs.get("errors")
+        if errores:
+            logger.error("Errores de scraping (%s) para '%s': %s", tipo, term, errores)
 
         df_res = pd.DataFrame(jobs)
         if not df_res.empty:
@@ -135,8 +141,11 @@ def main() -> None:
         results_wanted = 40
         delay_range = (7, 12)
 
-    # Obtener entorno (por defecto 'prod' si no se especifica)
-    APP_ENV = os.getenv("APP_ENV", "dev").lower()
+    # Obtener entorno (obligatorio: dev o prod)
+    APP_ENV = os.getenv("APP_ENV", "").strip().lower()
+    if APP_ENV not in ("dev", "prod"):
+        logger.error("APP_ENV no definido o inválido (%r). Valores permitidos: dev, prod.", APP_ENV)
+        sys.exit(1)
     BUCKET_BASE = "pipeline-scrapping-linkedin"
     BUCKET_NAME = f"{BUCKET_BASE}-dev" if APP_ENV == "dev" else BUCKET_BASE
 
@@ -158,6 +167,9 @@ def main() -> None:
 
     # 3. Finalización temprana si es Smoke Test
     if is_test:
+        if not ruta_final.exists():
+            logger.error("Smoke test fallido: no se generó ningún CSV.")
+            sys.exit(1)
         logger.info("Smoke test completado exitosamente.")
         return
 
