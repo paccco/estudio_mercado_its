@@ -14,7 +14,7 @@ from typing import List, Tuple
 import pandas as pd
 from jobspy import scrape_jobs
 
-# Import relativo dentro del paquete src
+# Import absoluto: Python añade el directorio del script (src/) a sys.path
 from s3_uploader import subir_a_s3, verificar_conexion_s3
 
 # Configuración del logging nativo
