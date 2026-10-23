@@ -56,6 +56,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Calcular tags de la imagen (:dev/:prod + :sha-<short>)
+        id: tags
+        run: |
+          IMAGE_LOWER=$(echo "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then ENV_TAG=prod; else ENV_TAG=dev; fi
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          {
+            echo "tags<<EOF"
+            echo "$IMAGE_LOWER:$ENV_TAG"
+            echo "$IMAGE_LOWER:sha-$SHORT_SHA"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Compilar y publicar imagen ARM64
         uses: docker/build-push-action@v5
         with:
@@ -63,7 +76,7 @@ jobs:
           file: ./scrapper/Dockerfile
           platforms: linux/arm64
           push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          tags: ${{ steps.tags.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -71,23 +84,27 @@ jobs:
     needs: build-arm-and-push
     runs-on: self-hosted
     steps:
-      - name: Formatear nombre de imagen a lowercase
+      - name: Formatear nombre de imagen a lowercase y tag de la rama
         run: |
           IMAGE_LOWER=$(echo "${{ github.repository }}_scrapper" | tr '[:upper:]' '[:lower:]')
           echo "IMAGE_NAME=$IMAGE_LOWER" >> $GITHUB_ENV
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "IMAGE_TAG=prod" >> $GITHUB_ENV
+          else
+            echo "IMAGE_TAG=dev" >> $GITHUB_ENV
+          fi
 
       - name: Iniciar sesión en el registro GHCR
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-      - name: Descargar última imagen actualizada y guardar ID
+      - name: Descargar la imagen de la rama y limpiar versiones antiguas
         run: |
-          docker pull ${{ env.REGISTRY }}/$IMAGE_NAME:latest
-          # Guardamos el ID específico de la imagen descargada
-          DOWNLOADED_ID=$(docker inspect --format='{{.Id}}' ${{ env.REGISTRY }}/$IMAGE_NAME:latest)
-          echo "DOWNLOADED_IMAGE_ID=$DOWNLOADED_ID" >> $GITHUB_ENV
+          docker pull ${{ env.REGISTRY }}/$IMAGE_NAME:$IMAGE_TAG
+          # Elimina las imágenes huérfanas (versiones anteriores que han perdido el tag)
+          docker image prune -f
 
-      # --- FLUJO RAMA DEV: Ejecutar prueba y destruir SOLO esa imagen ---
+      # --- FLUJO RAMA DEV: Ejecutar prueba inmediata ---
       - name: "[DEV] Ejecutar scraping de prueba inmediata"
         if: github.ref == 'refs/heads/dev'
         run: |
@@ -97,14 +114,4 @@ jobs:
             -e AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY_DEV }} \
             -e AWS_DEFAULT_REGION=eu-north-1 \
             -v /home/pacc/scraps:/app/scraps \
-            ${{ env.REGISTRY }}/$IMAGE_NAME:latest
-
-      - name: "[DEV] Eliminar únicamente la imagen descargada tras el test"
-        if: always() && github.ref == 'refs/heads/dev'
-        run: |
-          # Borra solo el contenedor/imagen específico por su ID sin tocar el resto del sistema
-          if [ -n "$DOWNLOADED_IMAGE_ID" ]; then
-            docker rmi -f $DOWNLOADED_IMAGE_ID
-          fi
-          
-          
+            ${{ env.REGISTRY }}/$IMAGE_NAME:$IMAGE_TAG
